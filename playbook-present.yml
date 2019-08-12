@@ -1,0 +1,202 @@
+- hosts: localhost
+  gather_facts: False
+
+  tasks:
+  - name: Create SSH security group
+    register: ssh_security_group
+    ec2_group:
+      description: allow ssh access to everyone
+      name: "{{ project_name }}-{{ randomizer }}-ssh-sg"
+      purge_rules: yes
+      purge_rules_egress: yes
+      purge_tags: yes
+      region: "{{ region_name }}"
+      rules:
+      - proto: tcp
+        ports:
+        - 22
+        cidr_ip: 0.0.0.0/0
+        rule_desc: allow ssh by all
+      state: present
+      tags:
+        Name: "{{ project_name }}-{{ randomizer }}-ssh-sg"
+        project_name: "{{ project_name }}"
+        owner: "{{ owner }}"
+        randomizer: "{{ randomizer }}"
+      validate_certs: yes
+      vpc_id: "{{ vpc_id }}"
+
+  - name: Create ALB security group
+    register: alb_security_group
+    ec2_group:
+      description: allow ec2 intances to talk to alb.
+      name: "{{ project_name }}-{{ randomizer }}-alb-sg"
+      region: "{{ region_name }}"
+      rules:
+      - proto: tcp
+        ports:
+        - 80
+        cidr_ip: 0.0.0.0/0
+        rule_desc: allow http by all
+      state: present
+      tags:
+        Name: "{{ project_name }}-{{ randomizer }}-alb-sg"
+        project_name: "{{ project_name }}"
+        owner: "{{ owner }}"
+        randomizer: "{{ randomizer }}"
+      vpc_id: "{{ vpc_id }}"
+
+
+  # - name: Show security group info
+  #   debug:
+  #     msg: "{{ ssh_security_group }}"
+  #
+
+  - name: create launch configuration
+    register: launch_configuration
+    ec2_lc:
+      assign_public_ip: yes
+      ebs_optimized: no
+      image_id: "{{ ami_id }}"
+      instance_monitoring: no
+      instance_profile_name: "{{ instance_profile_name }}"
+      instance_type: "{{ instance_type }}"
+      key_name: "{{ key_name }}"
+      name: "{{ project_name }}-{{ randomizer }}-lc"
+      placement_tenancy: default
+      region: "{{ region_name }}"
+      security_groups:
+      - "{{ ssh_security_group.group_id }}"
+      - "{{ alb_security_group.group_id }}"
+      state: present
+      user_data_path: launch_configuration_user_data.sh
+      validate_certs: yes
+      vpc_id: "{{ vpc_id }}"
+
+  - name: S3 bucket for alb logs
+    register: alb_bucket
+    s3_bucket:
+      ceph: no
+      force: no
+      name: "{{ alb_bucket_name }}"
+      policy: "
+        {
+          \"Version\": \"2012-10-17\",
+          \"Statement\": [
+            {
+              \"Effect\": \"Allow\",
+              \"Principal\": {
+                \"AWS\":  \"arn:aws:iam::127311923021:root\"
+              },
+              \"Action\":  \"s3:PutObject\",
+              \"Resource\": \"arn:aws:s3:::xyz-0001-alb-logs/logs/AWSLogs/532914043478/*\"
+            }
+          ]
+        }"
+      region: "{{ region_name }}"
+      requester_pays: no
+      state: present
+      tags:
+        owner: "{{ owner }}"
+        project_name: "{{ project_name }}"
+        randomizer: "{{ randomizer }}"
+      validate_certs: yes
+      versioning: no
+
+  - name: create target group
+    register: target_group
+    elb_target_group:
+      health_check_path: /
+      health_check_protocol: http
+      name: "{{ project_name }}-{{ randomizer }}-tg"
+      port: 80
+      protocol: http
+      region: "{{ region_name }}"
+      state: present
+      tags:
+        Name: "{{ project_name }}-{{ randomizer }}-tg"
+        owner: "{{ owner }}"
+        project_name: "{{ project_name }}"
+        randomizer: "{{ randomizer }}"
+      vpc_id: "{{ vpc_id }}"
+      #wait: yes
+
+  # - name: debug
+  #   debug:
+  #     msg: "{{ target_group }}"
+
+  - name: create application load balancer
+    register: alb
+    elb_application_lb:
+      access_logs_enabled: yes
+      access_logs_s3_bucket: "{{ alb_bucket.name }}"
+      access_logs_s3_prefix: logs
+      #http2: no
+      idle_timeout: 60
+      listeners:
+      - Protocol: HTTP
+        Port: 80
+        DefaultActions:
+        - Type: forward
+          TargetGroupName: "{{ target_group.target_group_name }}"
+      name: "{{ project_name }}-{{ randomizer }}-alb"
+      region: "{{ region_name }}"
+      scheme: internet-facing
+      security_groups:
+      - "{{ alb_security_group.group_id }}"
+      state: present
+      subnets:
+      - "{{ subnet_a_id }}"
+      - "{{ subnet_b_id }}"
+      tags:
+        Name: "{{ project_name }}-{{ randomizer }}-alb"
+        owner: "{{ owner }}"
+        project_name: "{{ project_name }}"
+        randomizer: "{{ randomizer }}"
+      validate_certs: yes
+      wait: yes
+      wait_timeout: 300
+
+  - name: create auto-scaling group
+    register: asg
+    ec2_asg:
+      default_cooldown: "300" # seconds
+      desired_capacity: 2
+      health_check_period: "300" # seconds
+      health_check_type: EC2
+      launch_config_name: "{{ launch_configuration.name }}"
+      lc_check: yes
+      max_size: 5
+      metrics_collection: yes
+      metrics_granularity: "1Minute"
+      metrics_list:
+      - "GroupMinSize"
+      - "GroupMaxSize"
+      - "GroupDesiredCapacity"
+      - "GroupInServiceInstances"
+      - "GroupPendingInstances"
+      - "GroupStandbyInstances"
+      - "GroupTerminatingInstances"
+      - "GroupTotalInstances"
+      min_size: 2
+      name: "{{ project_name }}-{{ randomizer }}-asg"
+      #notification_topic
+      #notification_types: ["autoscaling:EC2_INSTANCE_LAUNCH", "autoscaling:EC2_INSTANCE_LAUNCH_ERROR", "autoscaling:EC2_INSTANCE_TERMINATE", "autoscaling:EC2_INSTANCE_TERMINATE_ERROR"]
+      region: "{{ region_name }}"
+      replace_all_instances: yes
+      replace_batch_size: 1
+      state: present
+      tags:
+      - Name: "{{ project_name }}-{{ randomizer }}-asg"
+      - project_name: "{{ project_name }}"
+      - owner: "{{ owner }}"
+      - randomizer: "{{ randomizer }}"
+      - propagate_at_launch: yes
+      target_group_arns: "{{ target_group.target_group_arn }}"
+      termination_policies: default
+      validate_certs: yes
+      vpc_zone_identifier:
+      - "{{ subnet_a_id }}"
+      - "{{ subnet_b_id }}"
+      wait_for_instances: yes
+      wait_timeout: 300

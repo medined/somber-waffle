@@ -1,0 +1,35 @@
+- hosts: localhost
+  gather_facts: False
+
+  tasks:
+
+  - name: remove auto-scaling group
+    ec2_asg:
+      name: "{{ project_name }}-{{ randomizer }}-asg"
+      state: absent
+      wait_timeout: 600
+
+  - name: remove application load balancer
+    elb_application_lb:
+      name: "{{ project_name }}-{{ randomizer }}-alb"
+      state: absent
+
+  - name: remove launch configuration
+    ec2_lc:
+      name: "{{ project_name }}-{{ randomizer }}-lc"
+      state: absent
+
+  - name: remove target group
+    elb_target_group:
+      name: "{{ project_name }}-{{ randomizer }}-tg"
+      state: absent
+
+  - name: remove alb security group
+    ec2_group:
+      name: "{{ project_name }}-{{ randomizer }}-alb-sg"
+      state: absent
+
+  - name: remove ssh security group
+    ec2_group:
+      name: "{{ project_name }}-{{ randomizer }}-ssh-sg"
+      state: absent
